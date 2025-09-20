@@ -1,0 +1,98 @@
+BANK TRANSACTION CATEGORIZATION SYSTEM - CONTEXT FOR LLM
+
+SYSTEM OVERVIEW:
+This is an automated bank transaction categorization system designed for a pet grooming business. The system processes bank statements from Google Sheets, applies intelligent categorization using rules and ML, and stores results in MySQL database.
+
+COMPLETE WORKFLOW:
+
+1. DATA INPUT PHASE:
+   - Bank statements uploaded to Google Sheets in standardized format
+   - Google Apps Script triggers the categorization process
+   - Transaction data sent to FastAPI application on AWS Lightsail
+
+2. CATEGORIZATION PHASE (Multi-layered approach):
+   
+   A) RULE-BASED CATEGORIZATION (Primary - Highest Priority):
+      - Salary Detection: Matches employee names with salary keywords
+      - 187+ Keyword Rules covering business expense categories:
+        * Grooming Inventory (Vet India Pharma, Amazon, Nutan Medical, etc.)
+        * Vehicle Subscription (Imobility)
+        * Fuel expenses (Petrol, Diesel, BPCL, etc.)
+        * Office Overhead (Swiggy, Water Tanker, Milk, Garbage, etc.)
+        * Electricity bills
+        * Telecom/Internet (Airtel)
+        * Bank charges (IMPS, TDS)
+        * Loan EMI payments (Bajaj, Godrej, HDFC, etc.)
+        * Admin expenses (Slot Books, Vet Doctor)
+        * Employee welfare (Hostel fees)
+        * Customer refunds
+        * Repair & maintenance (Generator, Plumbing, Water Wash)
+        * Tax & duties (TDS, GST, EPFO)
+   
+   B) MACHINE LEARNING FALLBACK (Secondary):
+      - Uses TF-IDF vectorization + Logistic Regression
+      - Activated only when no rule matches
+      - Confidence threshold: 0.75 (configurable)
+   
+   C) LLM SUBCATEGORY GENERATION (Tertiary):
+      - OpenAI GPT-4o-mini for subcategory generation
+      - Only when no rule-based subcategory available
+
+3. DATA PROCESSING:
+   - Transaction description normalization
+   - Vendor name extraction
+   - Unique hash generation for deduplication
+   - Confidence scoring for all categorizations
+
+4. VERIFICATION PHASE:
+   - Categorized data sent back to Google Sheets
+   - Manual verification and correction
+   - New categories added to rules system
+
+5. DATABASE STORAGE:
+   - Verified data synced to MySQL
+   - Two tables: transactions_raw (original) and transactions_canonical (processed)
+
+TECHNICAL ARCHITECTURE:
+
+API ENDPOINTS:
+- POST /classify: Categorize transactions (requires API key)
+- POST /sync: Store verified data in database (requires API key)
+
+KEY FEATURES:
+- Hot-reload rules system (no restart needed)
+- Multi-layered categorization (Rules → ML → LLM)
+- Error handling with graceful fallbacks
+- Security with API key authentication
+- Input validation using Pydantic models
+
+DATA MODELS:
+- Input: RowIn (date, description, amount, balance, account, currency)
+- Output: PredOut (includes vendor, categories, confidence, rule_hit)
+
+BUSINESS CONTEXT:
+- Pet grooming business with specific expense categories
+- Employee salary management (Back Office, Operations, Customer Care teams)
+- Inventory procurement for grooming supplies
+- Vehicle and fuel management
+- Office operations and overhead
+- Financial obligations (loans, taxes, EPFO)
+- Customer service and refunds
+
+CONFIGURATION:
+- Environment variables for API keys, database credentials
+- ML threshold configurable (default 0.75)
+- Model files: tfidf.joblib, logreg.joblib
+
+DEPLOYMENT:
+- AWS Lightsail
+- Docker containerization
+- Environment-based configuration
+
+MAINTENANCE:
+- Rules updatable via rules.py
+- ML models replaceable
+- Database schema supports category management
+- Comprehensive logging
+
+This system provides intelligent, automated categorization of bank transactions with human verification, specifically designed for a pet grooming business's financial management needs.
