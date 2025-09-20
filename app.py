@@ -226,10 +226,12 @@ def learn_rules_from_database():
             keywords = []
             
             for word in words:
-                # Filter out common words and short words
+                # Filter out common words, short words, and problematic characters
                 if (len(word) >= 3 and 
                     word not in existing_keywords and
-                    word not in ["THE", "AND", "FOR", "WITH", "FROM", "TO", "OF", "IN", "ON", "AT", "BY"]):
+                    word not in ["THE", "AND", "FOR", "WITH", "FROM", "TO", "OF", "IN", "ON", "AT", "BY", "PAYMENT", "TRANSFER", "NEFT", "IMPS", "UPI"] and
+                    word.isalnum() and  # Only alphanumeric characters
+                    not word.isdigit()):  # Not just numbers
                     keywords.append(word)
             
             # Also check vendor text
@@ -286,7 +288,24 @@ def update_rules_file(new_rules):
         # Generate new rule entries
         new_rule_entries = []
         for rule in new_rules:
-            rule_entry = f'    {{"name":"{rule["name"]}", "priority":{rule["priority"]}, "any":{rule["any"]}, "main":"{rule["main"]}","sub":"{rule["sub"]}"}},'
+            # Properly escape all special characters
+            def escape_string(s):
+                if not s:
+                    return '""'
+                # Escape backslashes first, then quotes
+                s = str(s).replace('\\', '\\\\')
+                s = s.replace('"', '\\"')
+                s = s.replace('\n', '\\n')
+                s = s.replace('\r', '\\r')
+                s = s.replace('\t', '\\t')
+                return f'"{s}"'
+            
+            # Format the any list properly
+            any_items = [escape_string(item) for item in rule["any"]]
+            any_list = f"[{', '.join(any_items)}]"
+            
+            # Create the rule entry with proper escaping
+            rule_entry = f'    {{"name":{escape_string(rule["name"])}, "priority":{rule["priority"]}, "any":{any_list}, "main":{escape_string(rule["main"])},"sub":{escape_string(rule["sub"])}}},'
             new_rule_entries.append(rule_entry)
         
         # Insert new rules before the closing bracket
@@ -296,8 +315,19 @@ def update_rules_file(new_rules):
         with open("rules.py", "w", encoding="utf-8") as f:
             f.write(new_content)
         
-        print(f"Successfully added {len(new_rules)} new rules to rules.py")
-        return True
+        # Validate the updated file by trying to compile it
+        try:
+            import ast
+            with open("rules.py", "r", encoding="utf-8") as f:
+                ast.parse(f.read())
+            print(f"Successfully added {len(new_rules)} new rules to rules.py")
+            return True
+        except SyntaxError as e:
+            print(f"Syntax error in updated rules.py: {e}")
+            # Restore original content
+            with open("rules.py", "w", encoding="utf-8") as f:
+                f.write(content)
+            return False
         
     except Exception as e:
         print(f"Error updating rules.py: {e}")
