@@ -1,0 +1,18 @@
+# Python cache
+*.pyc
+# Virtual environments
+.venv/
+venv/
+
+# Env and credentials
+.env
+*.json
+*.pem
+
+# OS/editor junk
+.DS_Store
+.vscode/
+.idea/
+
+# Backups
+*.bak*

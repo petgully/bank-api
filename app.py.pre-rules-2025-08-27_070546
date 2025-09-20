@@ -1,0 +1,358 @@
+from fastapi import FastAPI, Depends, Header, HTTPException
+
+from pydantic import BaseModel
+
+from typing import List, Optional, Tuple
+
+import os, re, hashlib
+
+
+
+# ---------- FastAPI ----------
+
+app = FastAPI()
+
+
+
+# ---------- Security (header key) ----------
+
+API_KEY = os.getenv("API_KEY", "")
+
+def require_key(x_api_key: str = Header(default="")):
+
+    if not API_KEY or x_api_key != API_KEY:
+
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+
+# ---------- Optional OpenAI for subcategory fallback ----------
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+try:
+
+    import openai
+
+    if OPENAI_API_KEY:
+
+        openai.api_key = OPENAI_API_KEY
+
+except Exception:
+
+    openai = None
+
+
+
+# ---------- MySQL config ----------
+
+import mysql.connector
+
+DB_HOST = os.getenv("DB_HOST")
+
+DB_USER = os.getenv("DB_USER")
+
+DB_PASS = os.getenv("DB_PASS")
+
+DB_NAME = os.getenv("DB_NAME")
+
+
+
+def get_conn():
+
+    return mysql.connector.connect(
+
+        host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME
+
+    )
+
+
+
+# ---------- Models ----------
+
+class RowIn(BaseModel):
+
+    row_index: Optional[int] = None
+
+    date: str
+
+    description: str
+
+    amount: float
+
+    balance: Optional[float] = None
+
+    account: Optional[str] = ""
+
+    currency: Optional[str] = "INR"
+
+
+
+class PredOut(RowIn):
+
+    vendor: Optional[str] = ""
+
+    rule_hit: Optional[str] = ""
+
+    main_category_suggested: str
+
+    sub_category_suggested: str
+
+    confidence: float
+
+
+
+class Rows(BaseModel):
+
+    rows: List[RowIn]
+
+
+
+# payload used by /sync (includes final categories etc.)
+
+class SyncRowIn(RowIn):
+
+    vendor: Optional[str] = None
+
+    main_category: Optional[str] = None
+
+    sub_category: Optional[str] = None
+
+    confidence: Optional[float] = None
+
+    rule_hit: Optional[str] = None
+
+    raw_row: Optional[int] = None
+
+
+
+class SyncRows(BaseModel):
+
+    rows: List[SyncRowIn]
+
+
+
+# ---------- Utils ----------
+
+RULES: List[Tuple[re.Pattern, str, str]] = [
+
+    (re.compile(r'(?i)\bSWIGGY|ZOMATO|FOOD\b'), "Advertising & Marketing", "Food Delivery"),
+
+    (re.compile(r'(?i)\bAWS|AMAZON\s+WEB\s+SERVICES\b'), "Cloud & Hosting", "AWS Compute"),
+
+    (re.compile(r'(?i)\bUPI\b'), "Payments & Fees", "UPI Transfer"),
+
+    (re.compile(r'(?i)\bPAYROLL|SALARY\b'), "Salaries & Wages", "Payroll"),
+
+    (re.compile(r'(?i)\bFUEL|PETROL|DIESEL\b'), "Logistics", "Fuel"),
+
+    (re.compile(r'(?i)\bGST|TAX\b'), "Taxes", "GST Payment"),
+
+    (re.compile(r'(?i)\bAMC|MAINTENANCE\b'), "Repairs & Maintenance", "AMC")
+
+]
+
+
+
+def normalize_desc(s: str) -> str:
+
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    s = re.sub(r'[^A-Za-z0-9 &:/._-]', '', s)
+
+    return s
+
+
+
+def tx_hash(account: str, date: str, amount: float, norm_desc: str) -> str:
+
+    return hashlib.sha256(f"{account}|{date}|{amount:.2f}|{norm_desc}".encode("utf-8")).hexdigest()
+
+
+
+def rule_classify(desc: str):
+
+    for rx, main, sub in RULES:
+
+        if rx.search(desc):
+
+            return main, sub, rx.pattern
+
+    return None, None, None
+
+
+
+def llm_subcategory(desc: str, amount: float, main: str) -> str:
+
+    if not (openai and OPENAI_API_KEY):
+
+        return "Misc"
+
+    prompt = f"""
+
+You assign a short subcategory (2-5 words) for a business bank transaction.
+
+Main category: {main}
+
+Description: {desc}
+
+Amount: {amount}
+
+Rules:
+
+- Be concise, noun-phrase style.
+
+- Prefer consistent vendor-based labels if obvious.
+
+- If unclear, return "Misc".
+
+Only return the subcategory text, nothing else.
+
+"""
+
+    try:
+
+        resp = openai.ChatCompletion.create(
+
+            model="gpt-4o-mini",
+
+            messages=[{"role":"user","content":prompt}],
+
+            temperature=0.1
+
+        )
+
+        text = resp["choices"][0]["message"]["content"].strip()
+
+        return text[:40] if text else "Misc"
+
+    except Exception:
+
+        return "Misc"
+
+
+
+# ---------- Endpoints ----------
+
+@app.post("/classify", response_model=List[PredOut], dependencies=[Depends(require_key)])
+
+def classify(rows: Rows):
+
+    out: List[PredOut] = []
+
+    for r in rows.rows:
+
+        nd = normalize_desc(r.description)
+
+        vendor = (nd.split(' ')[0][:40] if nd else "")
+
+        main, sub, rule = rule_classify(nd)
+
+        conf = 0.95 if main else 0.5
+
+        if not main:
+
+            main = "Uncategorized"
+
+        sub_final = sub if sub else llm_subcategory(nd, r.amount, main)
+
+        out.append(PredOut(
+
+            row_index=r.row_index, date=r.date, description=r.description, amount=r.amount,
+
+            balance=r.balance, account=r.account, currency=r.currency,
+
+            vendor=vendor, rule_hit=rule or "",
+
+            main_category_suggested=main, sub_category_suggested=sub_final, confidence=conf
+
+        ))
+
+    return out
+
+
+
+@app.post("/sync", dependencies=[Depends(require_key)])
+
+def sync(rows: SyncRows):
+
+    conn = get_conn()
+
+    cur = conn.cursor()
+
+
+
+    ins_raw = """
+
+    INSERT IGNORE INTO transactions_raw
+
+    (hash, posted_at, description_raw, amount, balance_after, account, currency, created_at)
+
+    VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
+
+    """
+
+
+
+    ins_can = """
+
+    INSERT IGNORE INTO transactions_canonical
+
+    (raw_hash, posted_at, normalized_desc, amount, debit_credit, vendor_text, main_category_id,
+
+     sub_category_text, confidence, source, reviewed_at)
+
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'sheet',NOW())
+
+    """
+
+
+
+    for r in rows.rows:
+
+        nd = normalize_desc(r.description)
+
+        h = tx_hash(r.account or "", r.date, r.amount, nd)
+
+
+
+        # raw (dedupe by hash)
+
+        cur.execute(ins_raw, (h, r.date, r.description, r.amount, r.balance, r.account, r.currency))
+
+
+
+        # main category lookup by name (nullable)
+
+        main_id = None
+
+        if r.main_category:
+
+            cur.execute("SELECT id FROM categories_main WHERE name=%s", (r.main_category,))
+
+            row = cur.fetchone()
+
+            if row:
+
+                main_id = row[0]
+
+
+
+        debit_credit = 'debit' if r.amount < 0 else 'credit'
+
+        cur.execute(ins_can, (
+
+            h, r.date, nd, r.amount, debit_credit,
+
+            r.vendor, main_id, r.sub_category, r.confidence if r.confidence is not None else 0.0
+
+        ))
+
+
+
+    conn.commit()
+
+    cur.close(); conn.close()
+
+    return {"ok": True, "inserted": len(rows.rows)}
+

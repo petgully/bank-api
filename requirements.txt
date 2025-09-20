@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+openai
+mysql-connector-python
+scikit-learn
+joblib
