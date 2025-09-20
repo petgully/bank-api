@@ -173,6 +173,136 @@ Only return the subcategory text, nothing else.
     except Exception:
         return "Misc"
 
+# ---------- Rule Learning System ----------
+def learn_rules_from_database():
+    """
+    Analyze verified transactions from database and generate new rules
+    Returns: List of new rules to be added
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    
+    try:
+        # Get verified transactions with their categories
+        query = """
+        SELECT 
+            tc.normalized_desc,
+            tc.vendor_text,
+            tc.sub_category_text,
+            cm.name as main_category,
+            COUNT(*) as frequency,
+            AVG(tc.confidence) as avg_confidence
+        FROM transactions_canonical tc
+        LEFT JOIN categories_main cm ON tc.main_category_id = cm.id
+        WHERE tc.reviewed_at IS NOT NULL 
+        AND tc.confidence > 0.8
+        AND tc.normalized_desc IS NOT NULL
+        AND tc.normalized_desc != ''
+        GROUP BY tc.normalized_desc, tc.vendor_text, tc.sub_category_text, cm.name
+        HAVING COUNT(*) >= 2
+        ORDER BY frequency DESC, avg_confidence DESC
+        """
+        
+        cur.execute(query)
+        results = cur.fetchall()
+        
+        new_rules = []
+        existing_keywords = set()
+        
+        # Get existing rule keywords to avoid duplicates
+        mod = _load_rules_module()
+        if mod and hasattr(mod, "RULES"):
+            for rule in mod.RULES:
+                existing_keywords.update(rule.get("any", []))
+        
+        for row in results:
+            normalized_desc, vendor_text, sub_category, main_category, frequency, avg_confidence = row
+            
+            if not main_category or not sub_category:
+                continue
+                
+            # Extract potential keywords from normalized description
+            words = normalized_desc.upper().split()
+            keywords = []
+            
+            for word in words:
+                # Filter out common words and short words
+                if (len(word) >= 3 and 
+                    word not in existing_keywords and
+                    word not in ["THE", "AND", "FOR", "WITH", "FROM", "TO", "OF", "IN", "ON", "AT", "BY"]):
+                    keywords.append(word)
+            
+            # Also check vendor text
+            if vendor_text and len(vendor_text) >= 3:
+                vendor_clean = vendor_text.upper().strip()
+                if vendor_clean not in existing_keywords:
+                    keywords.append(vendor_clean)
+            
+            if keywords and frequency >= 2 and avg_confidence > 0.8:
+                # Create rule name
+                rule_name = f"Auto-learned: {keywords[0]}"
+                if len(keywords) > 1:
+                    rule_name += f" +{len(keywords)-1}"
+                
+                new_rule = {
+                    "name": rule_name,
+                    "priority": 50,  # Medium priority for auto-learned rules
+                    "any": keywords[:3],  # Limit to top 3 keywords
+                    "main": main_category,
+                    "sub": sub_category,
+                    "frequency": frequency,
+                    "confidence": avg_confidence
+                }
+                new_rules.append(new_rule)
+        
+        return new_rules
+        
+    except Exception as e:
+        print(f"Error learning rules from database: {e}")
+        return []
+    finally:
+        cur.close()
+        conn.close()
+
+def update_rules_file(new_rules):
+    """
+    Update rules.py file with new learned rules
+    """
+    if not new_rules:
+        print("No new rules to add.")
+        return False
+    
+    try:
+        # Read current rules.py
+        with open("rules.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        
+        # Find the RULES list end
+        rules_end = content.rfind("]")
+        if rules_end == -1:
+            print("Could not find RULES list in rules.py")
+            return False
+        
+        # Generate new rule entries
+        new_rule_entries = []
+        for rule in new_rules:
+            rule_entry = f'    {{"name":"{rule["name"]}", "priority":{rule["priority"]}, "any":{rule["any"]}, "main":"{rule["main"]}","sub":"{rule["sub"]}"}},'
+            new_rule_entries.append(rule_entry)
+        
+        # Insert new rules before the closing bracket
+        new_content = content[:rules_end] + "\n\n    # Auto-learned rules\n" + "\n".join(new_rule_entries) + "\n" + content[rules_end:]
+        
+        # Write back to file
+        with open("rules.py", "w", encoding="utf-8") as f:
+            f.write(new_content)
+        
+        print(f"Successfully added {len(new_rules)} new rules to rules.py")
+        return True
+        
+    except Exception as e:
+        print(f"Error updating rules.py: {e}")
+        return False
+
 # ---------- Endpoints ----------
 @app.post("/classify", response_model=List[PredOut], dependencies=[Depends(require_key)])
 def classify(rows: Rows):
@@ -243,3 +373,121 @@ def sync(rows: SyncRows):
     conn.commit()
     cur.close(); conn.close()
     return {"ok": True, "inserted": len(rows.rows)}
+
+@app.post("/learn-rules", dependencies=[Depends(require_key)])
+def learn_rules():
+    """
+    Manually trigger rule learning from verified database transactions
+    """
+    try:
+        print("Starting rule learning process...")
+        
+        # Learn new rules from database
+        new_rules = learn_rules_from_database()
+        
+        if not new_rules:
+            return {
+                "ok": True, 
+                "message": "No new rules found to learn",
+                "rules_learned": 0
+            }
+        
+        # Update rules.py file
+        success = update_rules_file(new_rules)
+        
+        if success:
+            # Force reload of rules module
+            importlib.invalidate_caches()
+            if "rules" in sys.modules:
+                importlib.reload(sys.modules["rules"])
+            
+            return {
+                "ok": True,
+                "message": f"Successfully learned {len(new_rules)} new rules",
+                "rules_learned": len(new_rules),
+                "new_rules": [
+                    {
+                        "name": rule["name"],
+                        "keywords": rule["any"],
+                        "main_category": rule["main"],
+                        "sub_category": rule["sub"],
+                        "frequency": rule["frequency"],
+                        "confidence": rule["confidence"]
+                    } for rule in new_rules
+                ]
+            }
+        else:
+            return {
+                "ok": False,
+                "message": "Failed to update rules.py file",
+                "rules_learned": 0
+            }
+            
+    except Exception as e:
+        print(f"Error in learn_rules endpoint: {e}")
+        return {
+            "ok": False,
+            "message": f"Error learning rules: {str(e)}",
+            "rules_learned": 0
+        }
+
+@app.get("/rule-stats", dependencies=[Depends(require_key)])
+def get_rule_stats():
+    """
+    Get statistics about current rules and database transactions
+    """
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Get total rules count
+        mod = _load_rules_module()
+        total_rules = len(mod.RULES) if mod and hasattr(mod, "RULES") else 0
+        
+        # Get database stats
+        cur.execute("""
+            SELECT 
+                COUNT(*) as total_transactions,
+                COUNT(CASE WHEN reviewed_at IS NOT NULL THEN 1 END) as verified_transactions,
+                COUNT(CASE WHEN confidence > 0.8 THEN 1 END) as high_confidence_transactions
+            FROM transactions_canonical
+        """)
+        db_stats = cur.fetchone()
+        
+        # Get category distribution
+        cur.execute("""
+            SELECT 
+                cm.name as main_category,
+                COUNT(*) as transaction_count
+            FROM transactions_canonical tc
+            LEFT JOIN categories_main cm ON tc.main_category_id = cm.id
+            WHERE tc.reviewed_at IS NOT NULL
+            GROUP BY cm.name
+            ORDER BY transaction_count DESC
+            LIMIT 10
+        """)
+        category_stats = cur.fetchall()
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            "ok": True,
+            "total_rules": total_rules,
+            "database_stats": {
+                "total_transactions": db_stats[0],
+                "verified_transactions": db_stats[1],
+                "high_confidence_transactions": db_stats[2]
+            },
+            "top_categories": [
+                {"category": row[0], "count": row[1]} 
+                for row in category_stats
+            ]
+        }
+        
+    except Exception as e:
+        print(f"Error getting rule stats: {e}")
+        return {
+            "ok": False,
+            "message": f"Error getting statistics: {str(e)}"
+        }
