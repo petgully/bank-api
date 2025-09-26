@@ -93,6 +93,16 @@ RULES: List[dict] = [
     {"name":"TDS Payment",     "priority":25, "any":["CBDT"],                       "main":"Tax & Duties","sub":"TDS Payment"},
     {"name":"GST Payment",     "priority":25, "any":["GST"],                        "main":"Tax & Duties","sub":"GST Payment"},
     {"name":"EPFO",            "priority":15, "any":["PSIVR"],                      "main":"Tax & Duties","sub":"EPFO"},
+
+    # Auto-learned rules
+    {"name":"Auto-learned: UPI-SWIGGYINSTAMART-SWIGGYINSTAMARTYESPA +1", "priority":30, "any":["UPI-SWIGGYINSTAMART-SWIGGYINSTAMARTYESPA", "APP"], "main":"Office Overhead","sub":"Swiggy"},
+    {"name":"Auto-learned: ELECTRICALS +2", "priority":30, "any":["ELECTRICALS", "SHAIK", "UPI-MOHD"], "main":"Office Overhead","sub":"Electrician"},
+    {"name":"Auto-learned: WATER +2", "priority":50, "any":["WATER", "WASH", "UPI-MUBEENA"], "main":"Repairs & Maintenance","sub":"Water Wash"},
+    {"name":"Auto-learned: UPI-M +2", "priority":50, "any":["UPI-M", "GANESH", "SRI"], "main":"Office Overhead","sub":"Electrician"},
+    {"name":"Auto-learned: SRINU +1", "priority":50, "any":["SRINU", "50100717843802-TPT-EXPENSES-SALAVATH"], "main":"Salaries & Wages","sub":"Operations Team"},
+    {"name":"Auto-learned: 50100409614942-TPT-EXPENSES-NELOJEE +2", "priority":50, "any":["50100409614942-TPT-EXPENSES-NELOJEE", "SAI", "KUMAR"], "main":"Salaries & Wages","sub":"Operations Team"},
+    {"name":"Auto-learned: 50100409619411-TPT-EXPENSES-NANDI +3", "priority":50, "any":["50100409619411-TPT-EXPENSES-NANDI", "SHIVA", "KUMAR"], "main":"Salaries & Wages","sub":"Operations Team"},
+    {"name":"Auto-learned: 50100713309854-TPT-EXPENSES-P +2", "priority":50, "any":["50100713309854-TPT-EXPENSES-P", "SHIVA", "KUMAR"], "main":"Salaries & Wages","sub":"Operations Team"},
 ]
 
 def apply_rules(narration: Optional[str]):
