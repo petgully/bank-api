@@ -113,7 +113,14 @@ def apply_rules(narration: Optional[str]):
     # 2) Keyword rules (by priority)
     for r in sorted(RULES, key=lambda x: x.get("priority", 100)):
         if any(tok in text for tok in r["any"]) and not any(tok in text for tok in r.get("not", [])):
-            return (r["main"], r["sub"], r["name"])
+            return (r["main"], r["sub"], r["name"
+
+    # Auto-learned rules
+    {"name":"Auto-learned: 50100717843802-TPT-EXPENSES-SALAVATH +2", "priority":50, "any":['50100717843802-TPT-EXPENSES-SALAVATH', 'SRINU', '50100717843802-TPT-EXPENSES-SALAVATH'], "main":"Salaries & Wages","sub":"Operations Team"},
+    {"name":"Auto-learned: 50100409614942-TPT-EXPENSES-NELOJEE +3", "priority":50, "any":['50100409614942-TPT-EXPENSES-NELOJEE', 'SAI', 'KUMAR'], "main":"Salaries & Wages","sub":"Operations Team"},
+    {"name":"Auto-learned: 50100409619411-TPT-EXPENSES-NANDI +4", "priority":50, "any":['50100409619411-TPT-EXPENSES-NANDI', 'GAMA', 'SHIVA'], "main":"Salaries & Wages","sub":"Operations Team"},
+    {"name":"Auto-learned: 50100713309854-TPT-EXPENSES-P +3", "priority":50, "any":['50100713309854-TPT-EXPENSES-P', 'SHIVA', 'KUMAR'], "main":"Salaries & Wages","sub":"Operations Team"},
+])
 
     # 3) No rule
     return (None, None, None)
