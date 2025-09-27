@@ -53,40 +53,126 @@ def load_model():
 
 load_model()
 
-# ---------- Rules module (external) with safe hot-reload ----------
-# We reload rules.py automatically if its mtime changes.
-from pathlib import Path
+# ---------- Database Rules System ----------
+import json
+from typing import List, Dict, Tuple
 
-RULES_PATH = Path(__file__).with_name("rules.py")
-_RULES_MTIME = None
-_rules_mod = None
+# Cache for database rules
+_db_rules_cache = None
+_db_rules_timestamp = None
+CACHE_DURATION = 300  # 5 minutes cache
 
-def _load_rules_module():
-    global _RULES_MTIME, _rules_mod
+def _load_rules_from_database():
+    """Load rules from database with caching"""
+    global _db_rules_cache, _db_rules_timestamp
+    
+    import time
+    current_time = time.time()
+    
+    # Return cached rules if still valid
+    if (_db_rules_cache is not None and 
+        _db_rules_timestamp is not None and 
+        current_time - _db_rules_timestamp < CACHE_DURATION):
+        return _db_rules_cache
+    
     try:
-        mtime = RULES_PATH.stat().st_mtime
-    except FileNotFoundError:
-        print("rules.py not found")
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Fetch all active rules from database
+        query = """
+        SELECT name, priority, keywords, main_category, sub_category, is_active
+        FROM rules 
+        WHERE is_active = 1 
+        ORDER BY priority ASC
+        """
+        
+        cur.execute(query)
+        results = cur.fetchall()
+        
+        # Process rules into the expected format
+        rules = []
+        salary_rules = []
+        
+        for row in results:
+            name, priority, keywords_json, main_category, sub_category, is_active = row
+            
+            if not is_active:
+                continue
+                
+            # Parse keywords JSON
+            try:
+                keywords = json.loads(keywords_json) if keywords_json else []
+            except (json.JSONDecodeError, TypeError):
+                keywords = []
+            
+            # Check if this is a salary rule
+            if name.startswith("Salary: "):
+                salary_rules.append({
+                    "name": name,
+                    "priority": priority,
+                    "keywords": keywords,
+                    "main_category": main_category,
+                    "sub_category": sub_category
+                })
+            else:
+                rules.append({
+                    "name": name,
+                    "priority": priority,
+                    "keywords": keywords,
+                    "main_category": main_category,
+                    "sub_category": sub_category
+                })
+        
+        # Cache the results
+        _db_rules_cache = {
+            "rules": rules,
+            "salary_rules": salary_rules
+        }
+        _db_rules_timestamp = current_time
+        
+        print(f"Loaded {len(rules)} regular rules and {len(salary_rules)} salary rules from database")
+        
+        cur.close()
+        conn.close()
+        
+        return _db_rules_cache
+        
+    except Exception as e:
+        print(f"Error loading rules from database: {e}")
         return None
 
-    if _rules_mod is None or _RULES_MTIME != mtime:
-        importlib.invalidate_caches()
-        if "rules" in sys.modules:
-            _rules_mod = importlib.reload(sys.modules["rules"])
-        else:
-            _rules_mod = importlib.import_module("rules")
-        _RULES_MTIME = mtime
-        print("rules.py loaded/reloaded.")
-    return _rules_mod
-
-def apply_rules_wrapper(narration: Optional[str]):
-    mod = _load_rules_module()
-    if not mod or not hasattr(mod, "apply_rules"):
+def apply_rules_wrapper(narration: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Apply rules from database to categorize transaction narration
+    Returns: (main_category, sub_category, rule_name) or (None, None, None)
+    """
+    if narration is None:
         return (None, None, None)
+    
+    # Load rules from database
+    rules_data = _load_rules_from_database()
+    if not rules_data:
+        return (None, None, None)
+    
+    text = str(narration).upper()
+    
     try:
-        return mod.apply_rules(narration)
+        # 1) Check salary rules first (highest precedence)
+        for rule in rules_data["salary_rules"]:
+            if any(keyword in text for keyword in rule["keywords"]):
+                return (rule["main_category"], rule["sub_category"], rule["name"])
+        
+        # 2) Check regular rules (by priority)
+        for rule in rules_data["rules"]:
+            if any(keyword in text for keyword in rule["keywords"]):
+                return (rule["main_category"], rule["sub_category"], rule["name"])
+        
+        # 3) No rule matched
+        return (None, None, None)
+        
     except Exception as e:
-        print(f"apply_rules error: {e}")
+        print(f"Error applying rules: {e}")
         return (None, None, None)
 
 # ---------- Schemas ----------
@@ -209,11 +295,11 @@ def learn_rules_from_database():
         new_rules = []
         existing_keywords = set()
         
-        # Get existing rule keywords to avoid duplicates
-        mod = _load_rules_module()
-        if mod and hasattr(mod, "RULES"):
-            for rule in mod.RULES:
-                existing_keywords.update(rule.get("any", []))
+        # Get existing rule keywords from database to avoid duplicates
+        rules_data = _load_rules_from_database()
+        if rules_data:
+            for rule in rules_data["rules"] + rules_data["salary_rules"]:
+                existing_keywords.update(rule.get("keywords", []))
         
         for row in results:
             normalized_desc, vendor_text, sub_category, main_category, frequency, avg_confidence = row
@@ -249,9 +335,9 @@ def learn_rules_from_database():
                 new_rule = {
                     "name": rule_name,
                     "priority": 50,  # Medium priority for auto-learned rules
-                    "any": keywords[:3],  # Limit to top 3 keywords
-                    "main": main_category,
-                    "sub": sub_category,
+                    "keywords": keywords[:3],  # Limit to top 3 keywords
+                    "main_category": main_category,
+                    "sub_category": sub_category,
                     "frequency": frequency,
                     "confidence": avg_confidence
                 }
@@ -266,71 +352,65 @@ def learn_rules_from_database():
         cur.close()
         conn.close()
 
-def update_rules_file(new_rules):
+def add_rules_to_database(new_rules):
     """
-    Update rules.py file with new learned rules
+    Add new learned rules to the database
     """
     if not new_rules:
         print("No new rules to add.")
         return False
     
     try:
-        # Read current rules.py
-        with open("rules.py", "r", encoding="utf-8") as f:
-            content = f.read()
+        conn = get_conn()
+        cur = conn.cursor()
         
-        # Find the RULES list end
-        rules_end = content.rfind("]")
-        if rules_end == -1:
-            print("Could not find RULES list in rules.py")
-            return False
+        # Clear cache to force reload
+        global _db_rules_cache, _db_rules_timestamp
+        _db_rules_cache = None
+        _db_rules_timestamp = None
         
-        # Generate new rule entries
-        new_rule_entries = []
+        added_count = 0
+        
         for rule in new_rules:
-            # Properly escape all special characters
-            def escape_string(s):
-                if not s:
-                    return '""'
-                # Escape backslashes first, then quotes
-                s = str(s).replace('\\', '\\\\')
-                s = s.replace('"', '\\"')
-                s = s.replace('\n', '\\n')
-                s = s.replace('\r', '\\r')
-                s = s.replace('\t', '\\t')
-                return f'"{s}"'
+            # Check if rule already exists
+            check_query = "SELECT id FROM rules WHERE name = %s"
+            cur.execute(check_query, (rule["name"],))
+            if cur.fetchone():
+                print(f"Rule '{rule['name']}' already exists, skipping")
+                continue
             
-            # Format the any list properly
-            any_items = [escape_string(item) for item in rule["any"]]
-            any_list = f"[{', '.join(any_items)}]"
+            # Insert new rule
+            insert_query = """
+            INSERT INTO rules (name, priority, keywords, main_category, sub_category, is_active, frequency, confidence, created_at, updated_at, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s)
+            """
             
-            # Create the rule entry with proper escaping
-            rule_entry = f'    {{"name":{escape_string(rule["name"])}, "priority":{rule["priority"]}, "any":{any_list}, "main":{escape_string(rule["main"])},"sub":{escape_string(rule["sub"])}}},'
-            new_rule_entries.append(rule_entry)
+            values = (
+                rule["name"],
+                rule["priority"],
+                json.dumps(rule["keywords"]),
+                rule["main_category"],
+                rule["sub_category"],
+                1,  # is_active
+                rule.get("frequency", 0),
+                rule.get("confidence", 0.95),
+                "auto-learned"
+            )
+            
+            cur.execute(insert_query, values)
+            added_count += 1
+            print(f"Added rule: {rule['name']}")
         
-        # Insert new rules before the closing bracket
-        new_content = content[:rules_end] + "\n\n    # Auto-learned rules\n" + "\n".join(new_rule_entries) + "\n" + content[rules_end:]
+        conn.commit()
+        print(f"Successfully added {added_count} new rules to database")
         
-        # Write back to file
-        with open("rules.py", "w", encoding="utf-8") as f:
-            f.write(new_content)
+        cur.close()
+        conn.close()
         
-        # Validate the updated file by trying to compile it
-        try:
-            import ast
-            with open("rules.py", "r", encoding="utf-8") as f:
-                ast.parse(f.read())
-            print(f"Successfully added {len(new_rules)} new rules to rules.py")
-            return True
-        except SyntaxError as e:
-            print(f"Syntax error in updated rules.py: {e}")
-            # Restore original content
-            with open("rules.py", "w", encoding="utf-8") as f:
-                f.write(content)
-            return False
+        return added_count > 0
         
     except Exception as e:
-        print(f"Error updating rules.py: {e}")
+        print(f"Error adding rules to database: {e}")
         return False
 
 # ---------- Endpoints ----------
@@ -422,15 +502,10 @@ def learn_rules():
                 "rules_learned": 0
             }
         
-        # Update rules.py file
-        success = update_rules_file(new_rules)
+        # Add new rules to database
+        success = add_rules_to_database(new_rules)
         
         if success:
-            # Force reload of rules module
-            importlib.invalidate_caches()
-            if "rules" in sys.modules:
-                importlib.reload(sys.modules["rules"])
-            
             return {
                 "ok": True,
                 "message": f"Successfully learned {len(new_rules)} new rules",
@@ -438,9 +513,9 @@ def learn_rules():
                 "new_rules": [
                     {
                         "name": rule["name"],
-                        "keywords": rule["any"],
-                        "main_category": rule["main"],
-                        "sub_category": rule["sub"],
+                        "keywords": rule["keywords"],
+                        "main_category": rule["main_category"],
+                        "sub_category": rule["sub_category"],
                         "frequency": rule["frequency"],
                         "confidence": rule["confidence"]
                     } for rule in new_rules
@@ -449,7 +524,7 @@ def learn_rules():
         else:
             return {
                 "ok": False,
-                "message": "Failed to update rules.py file",
+                "message": "Failed to add new rules to database",
                 "rules_learned": 0
             }
             
@@ -470,9 +545,9 @@ def get_rule_stats():
         conn = get_conn()
         cur = conn.cursor()
         
-        # Get total rules count
-        mod = _load_rules_module()
-        total_rules = len(mod.RULES) if mod and hasattr(mod, "RULES") else 0
+        # Get total rules count from database
+        cur.execute("SELECT COUNT(*) FROM rules WHERE is_active = 1")
+        total_rules = cur.fetchone()[0]
         
         # Get database stats
         cur.execute("""
