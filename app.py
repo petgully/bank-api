@@ -413,6 +413,73 @@ def add_rules_to_database(new_rules):
         print(f"Error adding rules to database: {e}")
         return False
 
+def auto_learn_from_manual_corrections(manual_corrections):
+    """
+    Automatically learn rules from manual corrections made in Google Sheets
+    """
+    if not manual_corrections:
+        return
+    
+    try:
+        # Get existing keywords to avoid duplicates
+        rules_data = _load_rules_from_database()
+        existing_keywords = set()
+        if rules_data:
+            for rule in rules_data["rules"] + rules_data["salary_rules"]:
+                existing_keywords.update(rule.get("keywords", []))
+        
+        new_rules = []
+        
+        for correction in manual_corrections:
+            description = correction["description"].upper()
+            vendor = correction["vendor"]
+            main_category = correction["main_category"]
+            sub_category = correction["sub_category"]
+            
+            # Extract keywords from description
+            words = description.split()
+            keywords = []
+            
+            for word in words:
+                # Filter out common words and short words
+                if (len(word) >= 3 and 
+                    word not in existing_keywords and
+                    word not in ["THE", "AND", "FOR", "WITH", "FROM", "TO", "OF", "IN", "ON", "AT", "BY", "PAYMENT", "TRANSFER", "NEFT", "IMPS", "UPI"] and
+                    word.isalnum() and
+                    not word.isdigit()):
+                    keywords.append(word)
+            
+            # Also check vendor text
+            if vendor and len(vendor) >= 3:
+                vendor_clean = vendor.upper().strip()
+                if vendor_clean not in existing_keywords:
+                    keywords.append(vendor_clean)
+            
+            if keywords:
+                # Create rule name
+                rule_name = f"Manual: {keywords[0]}"
+                if len(keywords) > 1:
+                    rule_name += f" +{len(keywords)-1}"
+                
+                new_rule = {
+                    "name": rule_name,
+                    "priority": 25,  # Medium-high priority for manual rules
+                    "keywords": keywords[:3],  # Limit to top 3 keywords
+                    "main_category": main_category,
+                    "sub_category": sub_category,
+                    "frequency": 1,
+                    "confidence": 0.95
+                }
+                new_rules.append(new_rule)
+        
+        # Add new rules to database
+        if new_rules:
+            add_rules_to_database(new_rules)
+            print(f"Auto-learned {len(new_rules)} rules from manual corrections")
+        
+    except Exception as e:
+        print(f"Error auto-learning from manual corrections: {e}")
+
 # ---------- Endpoints ----------
 @app.post("/classify", response_model=List[PredOut], dependencies=[Depends(require_key)])
 def classify(rows: Rows):
@@ -461,6 +528,9 @@ def sync(rows: SyncRows):
     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'sheet',NOW())
     """
 
+    # Track manual corrections for rule learning
+    manual_corrections = []
+    
     for r in rows.rows:
         nd = normalize_desc(r.description)
         h = tx_hash(r.account or "", r.date, r.amount, nd)
@@ -479,8 +549,25 @@ def sync(rows: SyncRows):
             h, r.date, nd, r.amount, debit_credit,
             r.vendor, main_id, r.sub_category, r.confidence if r.confidence is not None else 0.0
         ))
+        
+        # Track manual corrections for potential rule learning
+        if r.main_category and r.sub_category:
+            manual_corrections.append({
+                "description": nd,
+                "vendor": r.vendor,
+                "main_category": r.main_category,
+                "sub_category": r.sub_category
+            })
 
     conn.commit()
+    
+    # Auto-learn rules from manual corrections
+    if manual_corrections:
+        try:
+            auto_learn_from_manual_corrections(manual_corrections)
+        except Exception as e:
+            print(f"Error auto-learning from manual corrections: {e}")
+    
     cur.close(); conn.close()
     return {"ok": True, "inserted": len(rows.rows)}
 
