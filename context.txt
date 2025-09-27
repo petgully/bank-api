@@ -1,7 +1,7 @@
 BANK TRANSACTION CATEGORIZATION SYSTEM - CONTEXT FOR LLM
 
 SYSTEM OVERVIEW:
-This is an automated bank transaction categorization system designed for a pet grooming business. The system processes bank statements from Google Sheets, applies intelligent categorization using rules and ML, and stores results in MySQL database.
+This is an automated bank transaction categorization system designed for a pet grooming business. The system processes bank statements from Google Sheets, applies intelligent categorization using database-driven rules and ML, and stores results in MySQL database. The system features automatic rule learning from manual corrections.
 
 COMPLETE WORKFLOW:
 
@@ -12,9 +12,9 @@ COMPLETE WORKFLOW:
 
 2. CATEGORIZATION PHASE (Multi-layered approach):
    
-   A) RULE-BASED CATEGORIZATION (Primary - Highest Priority):
-      - Salary Detection: Matches employee names with salary keywords
-      - 187+ Keyword Rules covering business expense categories:
+   A) DATABASE-DRIVEN RULE CATEGORIZATION (Primary - Highest Priority):
+      - Rules stored in MySQL database (petgully_db.rules table)
+      - 73+ active rules covering business expense categories:
         * Grooming Inventory (Vet India Pharma, Amazon, Nutan Medical, etc.)
         * Vehicle Subscription (Imobility)
         * Fuel expenses (Petrol, Diesel, BPCL, etc.)
@@ -28,6 +28,9 @@ COMPLETE WORKFLOW:
         * Customer refunds
         * Repair & maintenance (Generator, Plumbing, Water Wash)
         * Tax & duties (TDS, GST, EPFO)
+        * Salary rules (26 employee names with salary keywords)
+      - Rules cached for 5 minutes for performance
+      - Three rule types: Script rules, Auto-learned rules, Manual rules
    
    B) MACHINE LEARNING FALLBACK (Secondary):
       - Uses TF-IDF vectorization + Logistic Regression
@@ -46,29 +49,43 @@ COMPLETE WORKFLOW:
 
 4. VERIFICATION PHASE:
    - Categorized data sent back to Google Sheets
-   - Manual verification and correction
-   - New categories added to rules system
+   - Manual verification and correction in FinalMainCategory field
+   - Automatic rule learning from manual corrections
 
-5. DATABASE STORAGE:
+5. AUTOMATIC RULE LEARNING:
+   - Manual corrections automatically create new database rules
+   - Keywords extracted from transaction descriptions
+   - Rules created with priority 25 (medium-high)
+   - Immediate availability for future transactions
+   - Three learning sources: Manual corrections, Verified transactions, Pattern analysis
+
+6. DATABASE STORAGE:
    - Verified data synced to MySQL
    - Two tables: transactions_raw (original) and transactions_canonical (processed)
+   - Rules table: petgully_db.rules with JSON keywords, priorities, categories
 
 TECHNICAL ARCHITECTURE:
 
 API ENDPOINTS:
-- POST /classify: Categorize transactions (requires API key)
-- POST /sync: Store verified data in database (requires API key)
+- POST /classify: Categorize transactions using database rules (requires API key)
+- POST /sync: Store verified data + auto-learn rules from corrections (requires API key)
+- POST /learn-rules: Manually trigger rule learning from verified transactions
+- GET /rule-stats: Get statistics about rules and database transactions
 
 KEY FEATURES:
-- Hot-reload rules system (no restart needed)
-- Multi-layered categorization (Rules → ML → LLM)
+- Database-driven rules system (no file dependencies)
+- Automatic rule learning from manual corrections
+- Multi-layered categorization (Database Rules → ML → LLM)
+- Rule caching for performance (5-minute cache)
 - Error handling with graceful fallbacks
 - Security with API key authentication
 - Input validation using Pydantic models
+- Hot-reload capability (rules update without restart)
 
 DATA MODELS:
 - Input: RowIn (date, description, amount, balance, account, currency)
 - Output: PredOut (includes vendor, categories, confidence, rule_hit)
+- Rules: Database table with name, priority, keywords (JSON), categories, metadata
 
 BUSINESS CONTEXT:
 - Pet grooming business with specific expense categories
@@ -83,16 +100,25 @@ CONFIGURATION:
 - Environment variables for API keys, database credentials
 - ML threshold configurable (default 0.75)
 - Model files: tfidf.joblib, logreg.joblib
+- Database connection: AWS RDS MySQL
 
 DEPLOYMENT:
-- AWS Lightsail
-- Docker containerization
+- AWS Lightsail with Docker containerization
 - Environment-based configuration
+- Database-driven architecture (no file dependencies)
 
 MAINTENANCE:
-- Rules updatable via rules.py
+- Rules managed in database (add/edit/disable via SQL)
+- Automatic rule learning reduces manual maintenance
 - ML models replaceable
 - Database schema supports category management
 - Comprehensive logging
 
-This system provides intelligent, automated categorization of bank transactions with human verification, specifically designed for a pet grooming business's financial management needs.
+RULE LEARNING SYSTEM:
+- Manual corrections → Automatic rule creation
+- Verified transactions → Pattern-based rule learning
+- Duplicate prevention with existing keyword checking
+- Priority-based rule ordering (Script: 5-50, Manual: 25, Auto-learned: 50)
+- JSON keyword storage for flexible matching
+
+This system provides intelligent, self-improving categorization of bank transactions with minimal manual intervention, specifically designed for a pet grooming business's financial management needs.
