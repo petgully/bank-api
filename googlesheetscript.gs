@@ -3,6 +3,7 @@ const CLASSIFIER_URL = 'https://bank-api.52-44-174-19.sslip.io/classify';
 const SYNC_URL       = 'https://bank-api.52-44-174-19.sslip.io/sync';
 const LEARN_RULES_URL = 'https://bank-api.52-44-174-19.sslip.io/learn-rules';
 const RULE_STATS_URL = 'https://bank-api.52-44-174-19.sslip.io/rule-stats';
+const CLEAR_CACHE_URL = 'https://bank-api.52-44-174-19.sslip.io/clear-cache';
 const API_KEY        = 'supersecret686';   // same value you used in docker run
 
 
@@ -43,13 +44,31 @@ function onOpen() {
     .addSeparator()
     .addItem('3) Learn New Rules from Database', 'menuLearnRules')
     .addItem('4) Show Rule Statistics', 'menuRuleStats')
+    .addItem('5) Clear Rules Cache (Force Reload)', 'menuClearCache')
     .addToUi();
 }
 
 function menuClassify() {
   const ss = SpreadsheetApp.getActive();
+  if (!ss) {
+    SpreadsheetApp.getUi().alert('No active spreadsheet found. Please open a spreadsheet and try again.');
+    return;
+  }
+  
   const raw = ss.getSheetByName(SHEET_RAW);
-  const range = raw.getActiveRange();
+  if (!raw) {
+    SpreadsheetApp.getUi().alert(`Sheet "${SHEET_RAW}" not found. Please make sure the sheet exists.`);
+    return;
+  }
+  
+  // Get active range safely
+  let range = null;
+  try {
+    range = raw.getActiveRange();
+  } catch (e) {
+    console.log('No active range, using full data range');
+  }
+  
   const values = (range && range.getNumRows() > 1) ? range.getValues() : raw.getDataRange().getValues();
 
   // --- header check ---
@@ -128,8 +147,16 @@ function writeReview(preds) {
 
 function menuApproveAndPublish() {
   const ss = SpreadsheetApp.getActive();
+  if (!ss) {
+    SpreadsheetApp.getUi().alert('No active spreadsheet found. Please open a spreadsheet and try again.');
+    return;
+  }
+  
   const sh = ss.getSheetByName(SHEET_REVIEW);
-  if (!sh) { SpreadsheetApp.getUi().alert('No review sheet.'); return; }
+  if (!sh) { 
+    SpreadsheetApp.getUi().alert('No review sheet found. Please run "Normalize & Classify" first.'); 
+    return; 
+  }
 
   const vals = sh.getDataRange().getValues();
   const header = vals[0];
@@ -189,6 +216,12 @@ function menuApproveAndPublish() {
 /** Menu handler: converts BankRaw_Statement into a fresh sheet with RAW_HEADER */
 function menuNormalizeBankRaw() {
   const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActive();
+  if (!ss) {
+    ui.alert('No active spreadsheet found. Please open a spreadsheet and try again.');
+    return;
+  }
+  
   try {
     const { outName, rowCount } = normalizeBankRawStatement();
     ui.alert('Done', `Created "${outName}" with ${rowCount} rows.`, ui.ButtonSet.OK);
@@ -501,6 +534,47 @@ function getRuleStatistics() {
   try {
     const response = UrlFetchApp.fetch(RULE_STATS_URL, {
       method: 'GET',
+      headers: { 'X-API-Key': API_KEY },
+      muteHttpExceptions: true
+    });
+    
+    if (response.getResponseCode() !== 200) {
+      return {
+        ok: false,
+        message: `HTTP ${response.getResponseCode()}: ${response.getContentText()}`
+      };
+    }
+    
+    return JSON.parse(response.getContentText());
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Network error: ${error.toString()}`
+    };
+  }
+}
+
+function menuClearCache() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    const result = clearRulesCache();
+    
+    if (result.ok) {
+      ui.alert('Cache Cleared', result.message, ui.ButtonSet.OK);
+    } else {
+      ui.alert('Cache Clear Failed', `Error: ${result.message}`, ui.ButtonSet.OK);
+    }
+  } catch (error) {
+    ui.alert('Cache Clear Error', `Unexpected error: ${error.toString()}`, ui.ButtonSet.OK);
+  }
+}
+
+function clearRulesCache() {
+  try {
+    const response = UrlFetchApp.fetch(CLEAR_CACHE_URL, {
+      method: 'POST',
+      contentType: 'application/json',
       headers: { 'X-API-Key': API_KEY },
       muteHttpExceptions: true
     });

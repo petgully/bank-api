@@ -819,3 +819,27 @@ def get_rule_stats():
             "ok": False,
             "message": f"Error getting statistics: {str(e)}"
         }
+
+@app.post("/clear-cache", dependencies=[Depends(require_key)])
+def clear_rules_cache():
+    """
+    Clear the rules cache to force reload from database
+    """
+    try:
+        global _db_rules_cache, _db_rules_timestamp
+        _db_rules_cache = None
+        _db_rules_timestamp = None
+        
+        print("Rules cache cleared - will reload from database on next request")
+        
+        return {
+            "ok": True,
+            "message": "Rules cache cleared successfully. Next request will reload from database."
+        }
+        
+    except Exception as e:
+        print(f"Error clearing cache: {e}")
+        return {
+            "ok": False,
+            "message": f"Error clearing cache: {str(e)}"
+        }
