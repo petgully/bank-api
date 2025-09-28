@@ -416,12 +416,16 @@ def add_rules_to_database(new_rules):
 def auto_learn_from_manual_corrections(manual_corrections):
     """
     Automatically learn rules from manual corrections made in Google Sheets
+    Includes conflict detection and rule updating for better accuracy
     """
     if not manual_corrections:
         return
     
     try:
-        # Get existing keywords to avoid duplicates
+        conn = get_conn()
+        cur = conn.cursor()
+        
+        # Get existing rules for conflict detection
         rules_data = _load_rules_from_database()
         existing_keywords = set()
         if rules_data:
@@ -429,6 +433,7 @@ def auto_learn_from_manual_corrections(manual_corrections):
                 existing_keywords.update(rule.get("keywords", []))
         
         new_rules = []
+        updated_rules = []
         
         for correction in manual_corrections:
             description = correction["description"].upper()
@@ -443,7 +448,6 @@ def auto_learn_from_manual_corrections(manual_corrections):
             for word in words:
                 # Filter out common words and short words
                 if (len(word) >= 3 and 
-                    word not in existing_keywords and
                     word not in ["THE", "AND", "FOR", "WITH", "FROM", "TO", "OF", "IN", "ON", "AT", "BY", "PAYMENT", "TRANSFER", "NEFT", "IMPS", "UPI"] and
                     word.isalnum() and
                     not word.isdigit()):
@@ -452,30 +456,89 @@ def auto_learn_from_manual_corrections(manual_corrections):
             # Also check vendor text
             if vendor and len(vendor) >= 3:
                 vendor_clean = vendor.upper().strip()
-                if vendor_clean not in existing_keywords:
+                if vendor_clean not in ["THE", "AND", "FOR", "WITH", "FROM", "TO", "OF", "IN", "ON", "AT", "BY", "PAYMENT", "TRANSFER", "NEFT", "IMPS", "UPI"]:
                     keywords.append(vendor_clean)
             
             if keywords:
-                # Create rule name
-                rule_name = f"Manual: {keywords[0]}"
-                if len(keywords) > 1:
-                    rule_name += f" +{len(keywords)-1}"
+                # Check for conflicting rules with same keywords but different categories
+                conflicting_rules = []
+                for keyword in keywords[:3]:  # Check top 3 keywords
+                    cur.execute("""
+                        SELECT id, name, main_category, sub_category, keywords 
+                        FROM rules 
+                        WHERE JSON_CONTAINS(keywords, %s) 
+                        AND (main_category != %s OR sub_category != %s)
+                        AND is_active = 1
+                    """, (json.dumps(keyword), main_category, sub_category))
+                    
+                    conflicts = cur.fetchall()
+                    conflicting_rules.extend(conflicts)
                 
-                new_rule = {
-                    "name": rule_name,
-                    "priority": 25,  # Medium-high priority for manual rules
-                    "keywords": keywords[:3],  # Limit to top 3 keywords
-                    "main_category": main_category,
-                    "sub_category": sub_category,
-                    "frequency": 1,
-                    "confidence": 0.95
-                }
-                new_rules.append(new_rule)
+                if conflicting_rules:
+                    # Update conflicting rules to match the manual correction
+                    for conflict in conflicting_rules:
+                        rule_id, old_name, old_main, old_sub, old_keywords = conflict
+                        
+                        # Update the conflicting rule
+                        cur.execute("""
+                            UPDATE rules 
+                            SET main_category = %s, sub_category = %s, 
+                                updated_at = NOW(), created_by = 'manual-updated'
+                            WHERE id = %s
+                        """, (main_category, sub_category, rule_id))
+                        
+                        updated_rules.append({
+                            "id": rule_id,
+                            "old_name": old_name,
+                            "old_category": f"{old_main} → {old_sub}",
+                            "new_category": f"{main_category} → {sub_category}"
+                        })
+                        
+                        print(f"Updated conflicting rule: {old_name} ({old_main} → {old_sub}) → ({main_category} → {sub_category})")
+                
+                # Check if we need to create a new rule (no conflicts found)
+                if not conflicting_rules:
+                    # Check if exact rule already exists
+                    cur.execute("""
+                        SELECT id FROM rules 
+                        WHERE main_category = %s AND sub_category = %s 
+                        AND JSON_CONTAINS(keywords, %s)
+                        AND is_active = 1
+                    """, (main_category, sub_category, json.dumps(keywords[0])))
+                    
+                    if not cur.fetchone():
+                        # Create new rule
+                        rule_name = f"Manual: {keywords[0]}"
+                        if len(keywords) > 1:
+                            rule_name += f" +{len(keywords)-1}"
+                        
+                        new_rule = {
+                            "name": rule_name,
+                            "priority": 25,  # Medium-high priority for manual rules
+                            "keywords": keywords[:3],  # Limit to top 3 keywords
+                            "main_category": main_category,
+                            "sub_category": sub_category,
+                            "frequency": 1,
+                            "confidence": 0.95
+                        }
+                        new_rules.append(new_rule)
         
         # Add new rules to database
         if new_rules:
             add_rules_to_database(new_rules)
-            print(f"Auto-learned {len(new_rules)} rules from manual corrections")
+            print(f"Auto-learned {len(new_rules)} new rules from manual corrections")
+        
+        if updated_rules:
+            conn.commit()
+            print(f"Updated {len(updated_rules)} conflicting rules based on manual corrections")
+        
+        # Clear cache to force reload
+        global _db_rules_cache, _db_rules_timestamp
+        _db_rules_cache = None
+        _db_rules_timestamp = None
+        
+        cur.close()
+        conn.close()
         
     except Exception as e:
         print(f"Error auto-learning from manual corrections: {e}")
