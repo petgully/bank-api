@@ -159,9 +159,16 @@ def apply_rules_wrapper(narration: Optional[str]) -> Tuple[Optional[str], Option
     
     try:
         # 1) Check salary rules first (highest precedence)
+        # For salary rules, we need BOTH the employee name AND salary keywords
         for rule in rules_data["salary_rules"]:
-            if any(keyword in text for keyword in rule["keywords"]):
-                return (rule["main_category"], rule["sub_category"], rule["name"])
+            keywords = rule["keywords"]
+            if len(keywords) >= 2:  # Should have employee name + salary keywords
+                employee_name = keywords[0]  # First keyword is employee name
+                salary_keywords = keywords[1:]  # Rest are salary keywords
+                
+                # Check if employee name is in text AND any salary keyword is in text
+                if employee_name in text and any(keyword in text for keyword in salary_keywords):
+                    return (rule["main_category"], rule["sub_category"], rule["name"])
         
         # 2) Check regular rules (by priority)
         for rule in rules_data["rules"]:
@@ -352,6 +359,47 @@ def learn_rules_from_database():
         cur.close()
         conn.close()
 
+def get_or_create_category_id(category_name, cur):
+    """
+    Get category ID from categories_main table, create if doesn't exist
+    Returns the category ID
+    """
+    if not category_name:
+        return None
+    
+    # First, try to find existing category
+    cur.execute("SELECT id FROM categories_main WHERE name = %s", (category_name,))
+    result = cur.fetchone()
+    
+    if result:
+        return result[0]
+    
+    # Category doesn't exist, create it
+    # Generate a code from the category name
+    code = category_name.upper().replace(' ', '').replace('&', '').replace('-', '')[:8]
+    
+    # Make sure code is unique
+    counter = 1
+    original_code = code
+    while True:
+        cur.execute("SELECT id FROM categories_main WHERE code = %s", (code,))
+        if not cur.fetchone():
+            break
+        code = f"{original_code}{counter}"
+        counter += 1
+    
+    # Insert new category
+    cur.execute("""
+        INSERT INTO categories_main (code, name, is_active)
+        VALUES (%s, %s, 1)
+    """, (code, category_name))
+    
+    # Get the new category ID
+    category_id = cur.lastrowid
+    print(f"Created new category: {category_name} (ID: {category_id}, Code: {code})")
+    
+    return category_id
+
 def add_rules_to_database(new_rules):
     """
     Add new learned rules to the database
@@ -459,6 +507,28 @@ def auto_learn_from_manual_corrections(manual_corrections):
                 if vendor_clean not in ["THE", "AND", "FOR", "WITH", "FROM", "TO", "OF", "IN", "ON", "AT", "BY", "PAYMENT", "TRANSFER", "NEFT", "IMPS", "UPI"]:
                     keywords.append(vendor_clean)
             
+            # Special handling for salary rules - need employee name + salary keywords
+            if main_category == "Salaries & Wages":
+                # Extract employee name from description or vendor
+                employee_name = None
+                if vendor and any(name_part in vendor.upper() for name_part in ["TPT-SALARY-", "SALARY-"]):
+                    # Extract name from vendor like "50100440274478-TPT-SALARY-KASIMALLA"
+                    parts = vendor.upper().split("-")
+                    if len(parts) >= 3:
+                        employee_name = parts[-1]  # Last part is the name
+                elif any(salary_word in description for salary_word in ["SALARY", "EXPENSES", "TPT"]):
+                    # Try to extract from description
+                    words = description.split()
+                    for i, word in enumerate(words):
+                        if word in ["SALARY", "EXPENSES", "TPT"] and i > 0:
+                            employee_name = words[i-1]
+                            break
+                
+                if employee_name:
+                    # Create salary rule with employee name + salary keywords
+                    salary_keywords = [employee_name] + ["SALARY", "EXPENSES", "NEFT DR", "IMPS", "TPT"]
+                    keywords = salary_keywords
+            
             if keywords:
                 # Check for conflicting rules with same keywords but different categories
                 conflicting_rules = []
@@ -475,6 +545,9 @@ def auto_learn_from_manual_corrections(manual_corrections):
                     conflicting_rules.extend(conflicts)
                 
                 if conflicting_rules:
+                    # Ensure the new category exists in categories_main
+                    get_or_create_category_id(main_category, cur)
+                    
                     # Update conflicting rules to match the manual correction
                     for conflict in conflicting_rules:
                         rule_id, old_name, old_main, old_sub, old_keywords = conflict
@@ -498,6 +571,9 @@ def auto_learn_from_manual_corrections(manual_corrections):
                 
                 # Check if we need to create a new rule (no conflicts found)
                 if not conflicting_rules:
+                    # Ensure the new category exists in categories_main
+                    get_or_create_category_id(main_category, cur)
+                    
                     # Check if exact rule already exists
                     cur.execute("""
                         SELECT id FROM rules 
@@ -593,7 +669,7 @@ def sync(rows: SyncRows):
 
     # Track manual corrections for rule learning
     manual_corrections = []
-    
+
     for r in rows.rows:
         nd = normalize_desc(r.description)
         h = tx_hash(r.account or "", r.date, r.amount, nd)
@@ -602,10 +678,7 @@ def sync(rows: SyncRows):
 
         main_id = None
         if r.main_category:
-            cur.execute("SELECT id FROM categories_main WHERE name=%s", (r.main_category,))
-            row = cur.fetchone()
-            if row:
-                main_id = row[0]
+            main_id = get_or_create_category_id(r.main_category, cur)
 
         debit_credit = 'debit' if r.amount < 0 else 'credit'
         cur.execute(ins_can, (
