@@ -713,12 +713,12 @@ def sync(rows: SyncRows):
 
     conn.commit()
     
-    # Auto-learn rules from manual corrections
-    if manual_corrections:
-        try:
-            auto_learn_from_manual_corrections(manual_corrections)
-        except Exception as e:
-            print(f"Error auto-learning from manual corrections: {e}")
+    # Auto-learn rules from manual corrections (disabled for now)
+    #if manual_corrections:
+    #    try:
+    #       auto_learn_from_manual_corrections(manual_corrections)
+    #    except Exception as e:
+    #        print(f"Error auto-learning from manual corrections: {e}")
     
     cur.close(); conn.close()
     return {"ok": True, "inserted": len(rows.rows)}
