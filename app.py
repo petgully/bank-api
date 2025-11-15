@@ -213,6 +213,22 @@ class SyncRowIn(RowIn):
 class SyncRows(BaseModel):
     rows: List[SyncRowIn]
 
+
+# ---------- Rule Schemas for API ----------
+
+class RuleBase(BaseModel):
+    id: Optional[int] = None           # we might not use this on insert, but it's useful on GET
+    name: str
+    priority: int = 100
+    keywords: List[str]
+    main_category: str
+    sub_category: str
+    is_active: bool = True
+
+class RulesPayload(BaseModel):
+    rules: List[RuleBase]
+
+
 # ---------- Utils ----------
 def normalize_desc(s: str) -> str:
     s = re.sub(r'\s+', ' ', s).strip()
@@ -843,3 +859,106 @@ def clear_rules_cache():
             "ok": False,
             "message": f"Error clearing cache: {str(e)}"
         }
+
+@app.get("/rules", dependencies=[Depends(require_key)])
+def get_rules():
+    """
+    Return all rules from the database so Google Sheets can view/edit them.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Adjust this SELECT if your rules table has different column names
+    cur.execute("""
+        SELECT id, name, priority, keywords, main_category, sub_category, is_active
+        FROM rules
+        ORDER BY priority ASC, id ASC
+    """)
+    rows = cur.fetchall()
+
+    cur.close()
+    conn.close()
+
+    out = []
+    for (rule_id, name, priority, keywords_json, main_cat, sub_cat, is_active) in rows:
+        try:
+            keywords = json.loads(keywords_json) if keywords_json else []
+        except Exception:
+            keywords = []
+
+        out.append({
+            "id": rule_id,
+            "name": name,
+            "priority": priority,
+            "keywords": keywords,
+            "main_category": main_cat,
+            "sub_category": sub_cat,
+            "is_active": bool(is_active),
+        })
+
+    return out
+
+@app.post("/rules/sync", dependencies=[Depends(require_key)])
+def sync_rules(payload: RulesPayload):
+    """
+    Replace all rules in the database with the provided list.
+    Intended to be called from Google Sheets.
+
+    Strategy:
+    - DELETE all existing rules
+    - INSERT all provided rules
+    - Clear in-memory rules cache
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    try:
+        # 1) Clear existing rules
+        cur.execute("DELETE FROM rules")
+
+        # 2) Insert new rules
+        # Match the columns you already use in add_rules_to_database
+        insert_sql = """
+            INSERT INTO rules
+            (name, priority, keywords, main_category, sub_category, is_active,
+             frequency, confidence, created_at, updated_at, created_by)
+            VALUES (%s, %s, %s, %s, %s, %s,
+                    %s, %s, NOW(), NOW(), %s)
+        """
+
+        count = 0
+        for r in payload.rules:
+            keywords_json = json.dumps(r.keywords or [])
+            cur.execute(
+                insert_sql,
+                (
+                    r.name,
+                    r.priority,
+                    keywords_json,
+                    r.main_category,
+                    r.sub_category,
+                    1 if r.is_active else 0,
+                    0,          # frequency (default)
+                    0.95,       # confidence (default)
+                    "sheet-sync"
+                ),
+            )
+            count += 1
+
+        conn.commit()
+
+        # 3) Clear cache so new rules are used on next /classify
+        global _db_rules_cache, _db_rules_timestamp
+        _db_rules_cache = None
+        _db_rules_timestamp = None
+
+        return {"ok": True, "count": count}
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Error syncing rules: {e}")
+        raise HTTPException(status_code=500, detail=f"Error syncing rules: {e}")
+
+    finally:
+        cur.close()
+        conn.close()
