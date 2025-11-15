@@ -676,12 +676,13 @@ def sync(rows: SyncRows):
     VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
     """
 
-    ins_can = """
+  ins_can = """
     INSERT IGNORE INTO transactions_canonical
-    (raw_hash, posted_at, normalized_desc, amount, debit_credit, vendor_text, main_category_id,
-     sub_category_text, confidence, source, reviewed_at)
+    (raw_hash, posted_at, normalized_desc, amount, debit_credit, vendor_text,
+     main_category_text, sub_category_text, confidence, source, reviewed_at)
     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'sheet',NOW())
     """
+
 
     # Track manual corrections for rule learning
     manual_corrections = []
@@ -692,14 +693,20 @@ def sync(rows: SyncRows):
 
         cur.execute(ins_raw, (h, r.date, r.description, r.amount, r.balance, r.account, r.currency))
 
-        main_id = None
-        if r.main_category:
-            main_id = get_or_create_category_id(r.main_category, cur)
+        main_cat = r.main_category if r.main_category else None
+        sub_cat = r.sub_category if r.sub_category else None
 
         debit_credit = 'debit' if r.amount < 0 else 'credit'
         cur.execute(ins_can, (
-            h, r.date, nd, r.amount, debit_credit,
-            r.vendor, main_id, r.sub_category, r.confidence if r.confidence is not None else 0.0
+            h,
+            r.date,
+            nd,
+            r.amount,
+            debit_credit,
+            r.vendor,
+            main_cat,
+            sub_cat,
+            r.confidence if r.confidence is not None else 0.0
         ))
         
         # Track manual corrections for potential rule learning
