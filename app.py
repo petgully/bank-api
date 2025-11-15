@@ -676,7 +676,7 @@ def sync(rows: SyncRows):
     VALUES (%s,%s,%s,%s,%s,%s,%s,NOW())
     """
 
-  ins_can = """
+    ins_can = """
     INSERT IGNORE INTO transactions_canonical
     (raw_hash, posted_at, normalized_desc, amount, debit_credit, vendor_text,
      main_category_text, sub_category_text, confidence, source, reviewed_at)
